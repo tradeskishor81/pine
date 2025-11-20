@@ -422,11 +422,19 @@ isHeldLessThanTargetBars = 0 < barsHeld and barsHeld < settings.exitAfterBars
 // Fractal Filters: Derived from relative appearances of signals in a given time series fractal/segment with a user-defined length
 isDifferentSignalType = ta.change(signal)
 // Check for early signal flips within the target holding period
-isEarlySignalFlip = false
-for i = 1 to settings.exitAfterBars - 1
-    if ta.change(signal[i])
-        isEarlySignalFlip := true
-        break
+var bool earlyFlip = false
+earlyFlip := false
+if settings.exitAfterBars >= 2
+    earlyFlip := ta.change(signal[1])
+if settings.exitAfterBars >= 3 and not earlyFlip
+    earlyFlip := ta.change(signal[2])
+if settings.exitAfterBars >= 4 and not earlyFlip
+    earlyFlip := ta.change(signal[3])
+if settings.exitAfterBars >= 5 and not earlyFlip
+    earlyFlip := ta.change(signal[4])
+if settings.exitAfterBars >= 6 and not earlyFlip
+    earlyFlip := ta.change(signal[5])
+isEarlySignalFlip = ta.change(signal) and earlyFlip
 isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
 isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
 isLastSignalBuy = signal[settings.exitAfterBars] == direction.long and isEmaUptrend[settings.exitAfterBars] and isSmaUptrend[settings.exitAfterBars]
@@ -567,11 +575,11 @@ if startShortTrade
 
 // Exit Labels
 if actualEndLongTrade and settings.showExits
-    exitLabel = reverseToShort ? "TP" : "SL"
+    string exitLabel = reverseToShort ? "TP" : "SL"
     label.new(bar_index, high + labelOffset, exitLabel, xloc.bar_index, yloc.price, color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 if actualEndShortTrade and settings.showExits
-    exitLabel = reverseToLong ? "TP" : "SL"
+    string exitLabel = reverseToLong ? "TP" : "SL"
     label.new(bar_index, low - labelOffset, exitLabel, xloc.bar_index, yloc.price, color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
 
 // ================
@@ -876,7 +884,7 @@ update_hourly_table(tbl) =>
     
     for h = 0 to 23
         [wr, pf, pnl, trades] = calcHourlyStats(h)
-        row = h + 1
+        int row = h + 1
         
         table.cell(tbl, 0, row, str.format('{0,number,00}:00', h), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
         
