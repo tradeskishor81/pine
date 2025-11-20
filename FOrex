@@ -120,6 +120,8 @@ type Settings
     int colorCompression
     bool showExits
     bool useDynamicExits
+    int exitAfterBars
+    bool exitOnNeutral
 
 type Label
     int long
@@ -202,13 +204,17 @@ Settings settings =
    input.int(title="Feature Count", defval=5, group="Feature Engineering", minval=2, maxval=5, tooltip="Number of features to use for ML predictions."),
    input.int(title="Color Compression", defval=1, group="General Settings", minval=1, maxval=10, tooltip="Compression factor for adjusting the intensity of the color scale."),
    input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur exactly 4 bars after an entry signal. This corresponds to the predefined length of a trade during the model's training process.", inline="exits"),
-   input.bool(title="Use Dynamic Exits", defval=false, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", inline="exits")
+   input.bool(title="Use Dynamic Exits", defval=false, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", inline="exits"),
+   exitAfterBars,
+   exitOnNeutral
  )
    
 // Trade Stats Settings
 // Note: The trade stats section is NOT intended to be used as a replacement for proper backtesting. It is intended to be used for calibration purposes only.
 showTradeStats = input.bool(true, 'Show Trade Stats', tooltip='Displays the trade stats for a given configuration. Useful for optimizing the settings in the Feature Engineering section. This should NOT replace backtesting and should be used for calibration purposes only. Early Signal Flips represent instances where the model changes signals before 4 bars elapses; high values can indicate choppy (ranging) market conditions.', group="General Settings")
 useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to use the worst case scenario for backtesting. This option can be useful for creating a conservative estimate that is based on close prices only, thus avoiding the effects of intrabar repainting. This option assumes that the user does not enter when the signal first appears and instead waits for the bar to close as confirmation. On larger timeframes, this can mean entering after a large move has already occurred. Leaving this option disabled is generally better for those that use this indicator as a source of confluence and prefer estimates that demonstrate discretionary mid-bar entries. Leaving this option enabled may be more consistent with traditional backtesting results.", group="General Settings")
+exitAfterBars = input.int(title="Exit After Bars", defval=4, minval=1, maxval=100, tooltip="Number of candles to hold a position before exiting. Replaces the hardcoded value of 4 bars.", group="General Settings")
+exitOnNeutral = input.bool(title="Exit on Neutral Signal", defval=true, tooltip="When enabled, exits the trade after the specified number of bars even if the signal remains neutral.", group="General Settings")
 
 // Settings object for user-defined settings
 FilterSettings filterSettings =
@@ -318,10 +324,10 @@ barPredictionsOffset = input.float(0, "Bar Prediction Offset", minval=0, tooltip
 // ==== Next Bar Classification ====
 // =================================
 
-// This model specializes specifically in predicting the direction of price action over the course of the next 4 bars. 
-// To avoid complications with the ML model, this value is hardcoded to 4 bars but support for other training lengths may be added in the future.
+// This model specializes specifically in predicting the direction of price action over the course of the next N bars (configurable). 
+// The number of bars is now user-configurable via the exitAfterBars setting.
 src = settings.source
-y_train_series = src[4] < src[0] ? direction.short : src[4] > src[0] ? direction.long : direction.neutral
+y_train_series = src[settings.exitAfterBars] < src[0] ? direction.short : src[settings.exitAfterBars] > src[0] ? direction.long : direction.neutral
 var y_train_array = array.new_int(0)
 
 // Variables used for ML Logic
@@ -407,19 +413,24 @@ filter_all = filter.volatility and filter.regime and filter.adx
 // Filtered Signal: The model's prediction of future price movement direction with user-defined filters applied
 signal := prediction > 0 and filter_all ? direction.long : prediction < 0 and filter_all ? direction.short : nz(signal[1])
 
-// Bar-Count Filters: Represents strict filters based on a pre-defined holding period of 4 bars
+// Bar-Count Filters: Represents strict filters based on a user-defined holding period
 var int barsHeld = 0
 barsHeld := ta.change(signal) ? 0 : barsHeld + 1
-isHeldFourBars = barsHeld == 4
-isHeldLessThanFourBars = 0 < barsHeld and barsHeld < 4
+isHeldTargetBars = barsHeld == settings.exitAfterBars
+isHeldLessThanTargetBars = 0 < barsHeld and barsHeld < settings.exitAfterBars
 
-// Fractal Filters: Derived from relative appearances of signals in a given time series fractal/segment with a default length of 4 bars
+// Fractal Filters: Derived from relative appearances of signals in a given time series fractal/segment with a user-defined length
 isDifferentSignalType = ta.change(signal)
-isEarlySignalFlip = ta.change(signal) and (ta.change(signal[1]) or ta.change(signal[2]) or ta.change(signal[3]))
+// Check for early signal flips within the target holding period
+isEarlySignalFlip = false
+for i = 1 to settings.exitAfterBars - 1
+    if ta.change(signal[i])
+        isEarlySignalFlip := true
+        break
 isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
 isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
-isLastSignalBuy = signal[4] == direction.long and isEmaUptrend[4] and isSmaUptrend[4]
-isLastSignalSell = signal[4] == direction.short and isEmaDowntrend[4] and isSmaDowntrend[4]
+isLastSignalBuy = signal[settings.exitAfterBars] == direction.long and isEmaUptrend[settings.exitAfterBars] and isSmaUptrend[settings.exitAfterBars]
+isLastSignalSell = signal[settings.exitAfterBars] == direction.short and isEmaDowntrend[settings.exitAfterBars] and isSmaDowntrend[settings.exitAfterBars]
 isNewBuySignal = isBuySignal and isDifferentSignalType
 isNewSellSignal = isSellSignal and isDifferentSignalType
 
@@ -460,9 +471,20 @@ isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishR
 // ==== Entries and Exits ====
 // ===========================
 
-// Entry Conditions: Booleans for ML Model Position Entries
-startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
-startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+// Entry Conditions: Booleans for ML Model Position Entries (Raw Signals)
+startLongTradeRaw = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
+startShortTradeRaw = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+
+// Trade State Tracking Variables
+var int currentPosition = 0 // 0 = no position, 1 = long, -1 = short
+var float entryPrice = 0.0
+var int entryBar = 0
+var float totalPoints = 0.0
+var int tradeCount = 0
+
+// Same-Side Signal Filtering: Only allow one entry per direction until exit
+startLongTrade = startLongTradeRaw and currentPosition != 1
+startShortTrade = startShortTradeRaw and currentPosition != -1
 
 // Dynamic Exit Conditions: Booleans for ML Model Position Exits based on Fractal Filters and Kernel Regression Filters
 lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
@@ -477,21 +499,80 @@ endLongTradeDynamic = (isBearishChange and isValidLongExit[1])
 endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
 
 // Fixed Exit Conditions: Booleans for ML Model Position Exits based on a Bar-Count Filters
-endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
-endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
+endLongTradeStrict = ((isHeldTargetBars and isLastSignalBuy and settings.exitOnNeutral) or (isHeldLessThanTargetBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[settings.exitAfterBars]
+endShortTradeStrict = ((isHeldTargetBars and isLastSignalSell and settings.exitOnNeutral) or (isHeldLessThanTargetBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[settings.exitAfterBars]
 isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
 endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
 endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+// Trade Reversal Logic: Detect opposite signals while in trade
+reverseToShort = startShortTradeRaw and currentPosition == 1
+reverseToLong = startLongTradeRaw and currentPosition == -1
+
+// Enhanced Exit Conditions with Reversals
+actualEndLongTrade = endLongTrade or reverseToShort
+actualEndShortTrade = endShortTrade or reverseToLong
+
+// Update Position State and Calculate Points
+if startLongTrade and currentPosition == 0
+    currentPosition := 1
+    entryPrice := close
+    entryBar := bar_index
+    tradeCount := tradeCount + 1
+    
+if startShortTrade and currentPosition == 0
+    currentPosition := -1
+    entryPrice := close
+    entryBar := bar_index
+    tradeCount := tradeCount + 1
+
+if actualEndLongTrade and currentPosition == 1
+    float exitPrice = close
+    float points = exitPrice - entryPrice
+    totalPoints := totalPoints + points
+    currentPosition := 0
+    // If this is a reversal, immediately enter short
+    if reverseToShort
+        currentPosition := -1
+        entryPrice := close
+        entryBar := bar_index
+        tradeCount := tradeCount + 1
+
+if actualEndShortTrade and currentPosition == -1
+    float exitPrice = close
+    float points = entryPrice - exitPrice
+    totalPoints := totalPoints + points
+    currentPosition := 0
+    // If this is a reversal, immediately enter long
+    if reverseToLong
+        currentPosition := 1
+        entryPrice := close
+        entryBar := bar_index
+        tradeCount := tradeCount + 1
 
 // =========================
 // ==== Plotting Labels ====
 // =========================
 
-// Note: These will not repaint once the most recent bar has fully closed. By default, signals appear over the last closed bar; to override this behavior set offset=0.
-plotshape(startLongTrade ? low : na, 'Buy', shape.labelup, location.belowbar, color=ml.color_green(prediction), size=size.small, offset=0)
-plotshape(startShortTrade ? high : na, 'Sell', shape.labeldown, location.abovebar, ml.color_red(-prediction), size=size.small, offset=0)
-plotshape(endLongTrade and settings.showExits ? high : na, 'StopBuy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
-plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+// Note: Labels positioned above/below candles for better visibility
+// ATR-based offset for label positioning
+labelOffset = ta.atr(14) * 0.5
+
+// Entry Labels
+if startLongTrade
+    label.new(bar_index, low - labelOffset, "Buy", xloc.bar_index, yloc.price, color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=size.normal)
+
+if startShortTrade
+    label.new(bar_index, high + labelOffset, "Sell", xloc.bar_index, yloc.price, color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=size.normal)
+
+// Exit Labels
+if actualEndLongTrade and settings.showExits
+    exitLabel = reverseToShort ? "TP" : "SL"
+    label.new(bar_index, high + labelOffset, exitLabel, xloc.bar_index, yloc.price, color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+if actualEndShortTrade and settings.showExits
+    exitLabel = reverseToLong ? "TP" : "SL"
+    label.new(bar_index, low - labelOffset, exitLabel, xloc.bar_index, yloc.price, color=color.new(color.orange, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
 
 // ================
 // ==== Alerts ====
@@ -499,13 +580,13 @@ plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcr
 
 // Separate Alerts for Entries and Exits
 alertcondition(startLongTrade, title='Open Long ▲', message='LDC Open Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endLongTrade, title='Close Long ▲', message='LDC Close Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(actualEndLongTrade, title='Close Long ▲', message='LDC Close Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
 alertcondition(startShortTrade, title='Open Short ▼', message='LDC Open Short  | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endShortTrade, title='Close Short ▼', message='LDC Close Short ▼ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(actualEndShortTrade, title='Close Short ▼', message='LDC Close Short ▼ | {{ticker}}@{{close}} | ({{interval}})')
 
 // Combined Alerts for Entries and Exits
 alertcondition(startShortTrade or startLongTrade, title='Open Position ▲▼', message='LDC Open Position ▲▼ | {{ticker}}@{{close}} | ({{interval}})')
-alertcondition(endShortTrade or endLongTrade, title='Close Position ▲▼', message='LDC Close Position  ▲▼ | {{ticker}}@[{{close}}] | ({{interval}})')
+alertcondition(actualEndShortTrade or actualEndLongTrade, title='Close Position ▲▼', message='LDC Close Position  ▲▼ | {{ticker}}@[{{close}}] | ({{interval}})')
 
 // Kernel Estimate Alerts
 alertcondition(condition=alertBullish, title='Kernel Bullish Color Change', message='LDC Kernel Bullish ▲ | {{ticker}}@{{close}} | ({{interval}})')
@@ -532,14 +613,14 @@ barcolor(showBarColors ? color.new(c_pred, 50) : na)
 // The following can be used to stream signals to a backtest adapter
 backTestStream = switch 
     startLongTrade => 1
-    endLongTrade => 2
+    actualEndLongTrade => 2
     startShortTrade => -1
-    endShortTrade => -2
+    actualEndShortTrade => -2
 plot(backTestStream, "Backtest Stream", display=display.none)
 
 // The following can be used to display real-time trade stats. This can be a useful mechanism for obtaining real-time feedback during Feature Engineering. This does NOT replace the need to properly backtest.
 // Note: In this context, a "Stop-Loss" is defined instances where the ML Signal prematurely flips directions before an exit signal can be generated.
-[totalWins, totalLosses, totalEarlySignalFlips, totalTrades, tradeStatsHeader, winLossRatio, winRate] = ml.backtest(high, low, open, startLongTrade, endLongTrade, startShortTrade, endShortTrade, isEarlySignalFlip, maxBarsBackIndex, bar_index, settings.source, useWorstCase)
+[totalWins, totalLosses, totalEarlySignalFlips, totalTrades, tradeStatsHeader, winLossRatio, winRate] = ml.backtest(high, low, open, startLongTrade, actualEndLongTrade, startShortTrade, actualEndShortTrade, isEarlySignalFlip, maxBarsBackIndex, bar_index, settings.source, useWorstCase)
 
 init_table() =>
     c_transparent = color.new(color.black, 100)
@@ -561,3 +642,258 @@ if showTradeStats
     var tbl = ml.init_table()
     if barstate.islast
         update_table(tbl, tradeStatsHeader, totalTrades, totalWins, totalLosses, winLossRatio, winRate, totalEarlySignalFlips)
+
+// ======================================
+// ==== Enhanced Performance Tables ====
+// ======================================
+
+// Input for showing enhanced performance tables
+showPerformanceTable = input.bool(true, "Show Performance Table", tooltip="Displays a comprehensive performance table with detailed trade statistics.", group="Display Settings")
+showHourlyTable = input.bool(false, "Show Hourly Analysis Table", tooltip="Displays hourly win rates, profit factors, and PNL breakdown.", group="Display Settings")
+
+// Enhanced Trade Tracking with detailed metrics
+var array<float> tradePoints = array.new_float()
+var array<int> tradeDurations = array.new_int()
+var array<int> tradeTypes = array.new_int() // 1 = long, -1 = short
+var array<int> tradeHours = array.new_int()
+var array<float> tradeWins = array.new_float()
+var array<float> tradeLosses = array.new_float()
+var float maxDrawdown = 0.0
+var float peakEquity = 0.0
+var float currentEquity = 0.0
+var int consecutiveWins = 0
+var int consecutiveLosses = 0
+var int maxConsecutiveWins = 0
+var int maxConsecutiveLosses = 0
+
+// Track trade completion for statistics
+var bool lastWasLong = false
+var bool lastWasShort = false
+var float lastEntryPrice = 0.0
+var int lastEntryBar = 0
+
+if startLongTrade
+    lastWasLong := true
+    lastWasShort := false
+    lastEntryPrice := close
+    lastEntryBar := bar_index
+
+if startShortTrade
+    lastWasShort := true
+    lastWasLong := false
+    lastEntryPrice := close
+    lastEntryBar := bar_index
+
+if actualEndLongTrade and lastWasLong
+    float points = close - lastEntryPrice
+    int duration = bar_index - lastEntryBar
+    array.push(tradePoints, points)
+    array.push(tradeDurations, duration)
+    array.push(tradeTypes, 1)
+    array.push(tradeHours, hour(time))
+    currentEquity := currentEquity + points
+    if points > 0
+        array.push(tradeWins, points)
+        consecutiveWins := consecutiveWins + 1
+        consecutiveLosses := 0
+        maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+    else
+        array.push(tradeLosses, math.abs(points))
+        consecutiveLosses := consecutiveLosses + 1
+        consecutiveWins := 0
+        maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+    if currentEquity > peakEquity
+        peakEquity := currentEquity
+    float drawdown = peakEquity - currentEquity
+    if drawdown > maxDrawdown
+        maxDrawdown := drawdown
+    lastWasLong := false
+
+if actualEndShortTrade and lastWasShort
+    float points = lastEntryPrice - close
+    int duration = bar_index - lastEntryBar
+    array.push(tradePoints, points)
+    array.push(tradeDurations, duration)
+    array.push(tradeTypes, -1)
+    array.push(tradeHours, hour(time))
+    currentEquity := currentEquity + points
+    if points > 0
+        array.push(tradeWins, points)
+        consecutiveWins := consecutiveWins + 1
+        consecutiveLosses := 0
+        maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+    else
+        array.push(tradeLosses, math.abs(points))
+        consecutiveLosses := consecutiveLosses + 1
+        consecutiveWins := 0
+        maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+    if currentEquity > peakEquity
+        peakEquity := currentEquity
+    float drawdown = peakEquity - currentEquity
+    if drawdown > maxDrawdown
+        maxDrawdown := drawdown
+    lastWasShort := false
+
+// Calculate comprehensive statistics
+calcWinRate() =>
+    int wins = 0
+    int total = array.size(tradePoints)
+    if total > 0
+        for i = 0 to total - 1
+            if array.get(tradePoints, i) > 0
+                wins := wins + 1
+        wins / total
+    else
+        0.0
+
+calcProfitFactor() =>
+    float grossProfit = array.size(tradeWins) > 0 ? array.sum(tradeWins) : 0.0
+    float grossLoss = array.size(tradeLosses) > 0 ? array.sum(tradeLosses) : 0.0
+    grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999.0 : 0.0
+
+calcAvgWin() =>
+    array.size(tradeWins) > 0 ? array.avg(tradeWins) : 0.0
+
+calcAvgLoss() =>
+    array.size(tradeLosses) > 0 ? array.avg(tradeLosses) : 0.0
+
+calcExpectancy() =>
+    float wr = calcWinRate()
+    float avgWin = calcAvgWin()
+    float avgLoss = calcAvgLoss()
+    (wr * avgWin) - ((1 - wr) * avgLoss)
+
+// Initialize comprehensive performance table
+init_performance_table() =>
+    c_transparent = color.new(color.black, 100)
+    table.new(position.bottom_right, columns=2, rows=14, frame_color=color.new(color.black, 100), frame_width=1, border_width=1, border_color=c_transparent)
+
+// Update comprehensive performance table
+update_performance_table(tbl) =>
+    c_transparent = color.new(color.black, 100)
+    c_header = color.new(#1e222d, 80)
+    
+    int totalTrades = array.size(tradePoints)
+    float winRate = calcWinRate()
+    float profitFactor = calcProfitFactor()
+    float avgWin = calcAvgWin()
+    float avgLoss = calcAvgLoss()
+    float expectancy = calcExpectancy()
+    float totalPnl = array.size(tradePoints) > 0 ? array.sum(tradePoints) : 0.0
+    int numWins = array.size(tradeWins)
+    int numLosses = array.size(tradeLosses)
+    float avgDuration = array.size(tradeDurations) > 0 ? array.avg(tradeDurations) : 0.0
+    
+    table.cell(tbl, 0, 0, 'Performance Metrics', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.normal)
+    table.cell(tbl, 1, 0, '', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.normal)
+    
+    table.cell(tbl, 0, 1, 'Total Trades', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(totalTrades), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    
+    table.cell(tbl, 0, 2, 'Win Rate', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(winRate * 100, '0.00') + '%', text_halign=text.align_right, bgcolor=c_transparent, text_color=winRate >= 0.5 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 3, 'Profit Factor', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(profitFactor, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=profitFactor >= 1.5 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 4, 'Total PNL', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(totalPnl, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=totalPnl > 0 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 5, 'Avg Win', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(avgWin, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.green, text_size=size.small)
+    
+    table.cell(tbl, 0, 6, 'Avg Loss', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 6, str.tostring(avgLoss, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 7, 'Expectancy', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 7, str.tostring(expectancy, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=expectancy > 0 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 8, 'Max Drawdown', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 8, str.tostring(maxDrawdown, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 9, 'Wins / Losses', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 9, str.tostring(numWins) + ' / ' + str.tostring(numLosses), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    
+    table.cell(tbl, 0, 10, 'Avg Duration', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 10, str.tostring(avgDuration, '0.0') + ' bars', text_halign=text.align_right, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    
+    table.cell(tbl, 0, 11, 'Max Win Streak', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 11, str.tostring(maxConsecutiveWins), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.green, text_size=size.small)
+    
+    table.cell(tbl, 0, 12, 'Max Loss Streak', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 12, str.tostring(maxConsecutiveLosses), text_halign=text.align_right, bgcolor=c_transparent, text_color=color.red, text_size=size.small)
+    
+    table.cell(tbl, 0, 13, 'Current Equity', text_halign=text.align_left, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 13, str.tostring(currentEquity, '0.00'), text_halign=text.align_right, bgcolor=c_transparent, text_color=currentEquity > 0 ? color.green : color.red, text_size=size.small)
+
+// Initialize hourly analysis table
+init_hourly_table() =>
+    c_transparent = color.new(color.black, 100)
+    table.new(position.bottom_left, columns=4, rows=25, frame_color=color.new(color.black, 100), frame_width=1, border_width=1, border_color=c_transparent)
+
+// Calculate hourly statistics
+calcHourlyStats(h) =>
+    var array<float> hourlyPoints = array.new_float()
+    array.clear(hourlyPoints)
+    
+    for i = 0 to array.size(tradeHours) - 1
+        if array.get(tradeHours, i) == h
+            array.push(hourlyPoints, array.get(tradePoints, i))
+    
+    int hourlyTrades = array.size(hourlyPoints)
+    float hourlyWR = 0.0
+    float hourlyPF = 0.0
+    float hourlyPNL = 0.0
+    
+    if hourlyTrades > 0
+        hourlyPNL := array.sum(hourlyPoints)
+        int hourlyWins = 0
+        float grossProfit = 0.0
+        float grossLoss = 0.0
+        
+        for i = 0 to hourlyTrades - 1
+            float points = array.get(hourlyPoints, i)
+            if points > 0
+                hourlyWins := hourlyWins + 1
+                grossProfit := grossProfit + points
+            else
+                grossLoss := grossLoss + math.abs(points)
+        
+        hourlyWR := hourlyWins / hourlyTrades
+        hourlyPF := grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999.0 : 0.0
+    
+    [hourlyWR, hourlyPF, hourlyPNL, hourlyTrades]
+
+// Update hourly analysis table
+update_hourly_table(tbl) =>
+    c_transparent = color.new(color.black, 100)
+    c_header = color.new(#1e222d, 80)
+    
+    table.cell(tbl, 0, 0, 'Hour', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, 'WR %', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 0, 'PF', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 3, 0, 'PNL', text_halign=text.align_center, bgcolor=c_header, text_color=color.white, text_size=size.small)
+    
+    for h = 0 to 23
+        [wr, pf, pnl, trades] = calcHourlyStats(h)
+        row = h + 1
+        
+        table.cell(tbl, 0, row, str.format('{0,number,00}:00', h), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+        
+        if trades > 0
+            table.cell(tbl, 1, row, str.tostring(wr * 100, '0.0'), text_halign=text.align_center, bgcolor=c_transparent, text_color=wr >= 0.5 ? color.green : color.red, text_size=size.small)
+            table.cell(tbl, 2, row, str.tostring(pf, '0.00'), text_halign=text.align_center, bgcolor=c_transparent, text_color=pf >= 1.5 ? color.green : color.red, text_size=size.small)
+            table.cell(tbl, 3, row, str.tostring(pnl, '0.00'), text_halign=text.align_center, bgcolor=c_transparent, text_color=pnl > 0 ? color.green : color.red, text_size=size.small)
+        else
+            table.cell(tbl, 1, row, '-', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+            table.cell(tbl, 2, row, '-', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+            table.cell(tbl, 3, row, '-', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.small)
+
+// Display tables on last bar
+if showPerformanceTable and barstate.islast
+    var perfTable = init_performance_table()
+    update_performance_table(perfTable)
+
+if showHourlyTable and barstate.islast
+    var hourlyTable = init_hourly_table()
+    update_hourly_table(hourlyTable)
