@@ -159,7 +159,17 @@ type FilterSettings
 type Filter
     bool volatility
     bool regime
-    bool adx 
+    bool adx
+
+// Feature 1 & 2: Performance tracking types
+type TradeRecord
+    int month
+    int hour
+    bool isWin
+    float points
+    float entryPrice
+    float exitPrice
+    int direction  // 1 for long, -1 for short 
 
 // ==========================
 // ==== Helper Functions ====
@@ -194,6 +204,10 @@ get_lorentzian_distance(int i, int featureCount, FeatureSeries featureSeries, Fe
 // ================ 
 
 // Settings Object: General User-Defined Inputs
+// Feature 6: Add custom candle exit setting
+exitBarsCount = input.int(title="Exit Bars Count", defval=4, minval=1, maxval=50, group="General Settings", tooltip="Number of bars before exit (replaces hardcoded 4-bar exit)")
+allowNeutralExits = input.bool(title="Allow Neutral Exit Signals", defval=true, group="General Settings", tooltip="Toggle to allow or disallow exits on neutral signals")
+
 Settings settings = 
  Settings.new(
    input.source(title='Source', defval=close, group="General Settings", tooltip="Source of the input data"),
@@ -201,7 +215,7 @@ Settings settings =
    input.int(title="Max Bars Back", defval=2000, group="General Settings"),
    input.int(title="Feature Count", defval=5, group="Feature Engineering", minval=2, maxval=5, tooltip="Number of features to use for ML predictions."),
    input.int(title="Color Compression", defval=1, group="General Settings", minval=1, maxval=10, tooltip="Compression factor for adjusting the intensity of the color scale."),
-   input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur exactly 4 bars after an entry signal. This corresponds to the predefined length of a trade during the model's training process.", inline="exits"),
+   input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur based on exit bars count setting.", inline="exits"),
    input.bool(title="Use Dynamic Exits", defval=false, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", inline="exits")
  )
    
@@ -314,14 +328,24 @@ showBarPredictions = input.bool(defval = true, title = "Show Bar Prediction Valu
 useAtrOffset = input.bool(defval = false, title = "Use ATR Offset", tooltip = "Will use the ATR offset instead of the bar prediction offset.", group="Display Settings")
 barPredictionsOffset = input.float(0, "Bar Prediction Offset", minval=0, tooltip="The offset of the bar predictions as a percentage from the bar high or close.", group="Display Settings")
 
+// Feature 1 & 2: Performance Table Settings
+showMonthlyTable = input.bool(true, "Show Monthly Performance Table", group="Performance Tables")
+showHourlyTable = input.bool(true, "Show Hourly Performance Table", group="Performance Tables")
+pnlPerPoint = input.float(10.0, "PNL per Point (USD)", minval=0.01, group="Performance Tables", tooltip="USD value per point for PNL calculation")
+usdToInr = input.float(83.0, "USD to INR Rate", minval=1, group="Performance Tables", tooltip="Exchange rate for converting USD to INR")
+monthlyTablePosition = input.string("Top Right", "Monthly Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Performance Tables")
+hourlyTablePosition = input.string("Top Left", "Hourly Table Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group="Performance Tables")
+tableTextColor = input.color(color.white, "Table Text Color", group="Performance Tables")
+tableBgColor = input.color(color.new(color.black, 80), "Table Background Color", group="Performance Tables")
+
 // =================================
 // ==== Next Bar Classification ====
 // =================================
 
-// This model specializes specifically in predicting the direction of price action over the course of the next 4 bars. 
-// To avoid complications with the ML model, this value is hardcoded to 4 bars but support for other training lengths may be added in the future.
+// This model specializes specifically in predicting the direction of price action over the course of the next bars. 
+// The number of bars can now be configured via exitBarsCount setting.
 src = settings.source
-y_train_series = src[4] < src[0] ? direction.short : src[4] > src[0] ? direction.long : direction.neutral
+y_train_series = src[exitBarsCount] < src[0] ? direction.short : src[exitBarsCount] > src[0] ? direction.long : allowNeutralExits ? direction.neutral : nz(y_train_series[1])
 var y_train_array = array.new_int(0)
 
 // Variables used for ML Logic
@@ -407,19 +431,19 @@ filter_all = filter.volatility and filter.regime and filter.adx
 // Filtered Signal: The model's prediction of future price movement direction with user-defined filters applied
 signal := prediction > 0 and filter_all ? direction.long : prediction < 0 and filter_all ? direction.short : nz(signal[1])
 
-// Bar-Count Filters: Represents strict filters based on a pre-defined holding period of 4 bars
+// Bar-Count Filters: Represents strict filters based on user-defined holding period
 var int barsHeld = 0
 barsHeld := ta.change(signal) ? 0 : barsHeld + 1
-isHeldFourBars = barsHeld == 4
-isHeldLessThanFourBars = 0 < barsHeld and barsHeld < 4
+isHeldFourBars = barsHeld == exitBarsCount
+isHeldLessThanFourBars = 0 < barsHeld and barsHeld < exitBarsCount
 
 // Fractal Filters: Derived from relative appearances of signals in a given time series fractal/segment with a default length of 4 bars
 isDifferentSignalType = ta.change(signal)
 isEarlySignalFlip = ta.change(signal) and (ta.change(signal[1]) or ta.change(signal[2]) or ta.change(signal[3]))
 isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
 isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
-isLastSignalBuy = signal[4] == direction.long and isEmaUptrend[4] and isSmaUptrend[4]
-isLastSignalSell = signal[4] == direction.short and isEmaDowntrend[4] and isSmaDowntrend[4]
+isLastSignalBuy = signal[exitBarsCount] == direction.long and isEmaUptrend[exitBarsCount] and isSmaUptrend[exitBarsCount]
+isLastSignalSell = signal[exitBarsCount] == direction.short and isEmaDowntrend[exitBarsCount] and isSmaDowntrend[exitBarsCount]
 isNewBuySignal = isBuySignal and isDifferentSignalType
 isNewSellSignal = isSellSignal and isDifferentSignalType
 
@@ -460,9 +484,23 @@ isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishR
 // ==== Entries and Exits ====
 // ===========================
 
-// Entry Conditions: Booleans for ML Model Position Entries
-startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
-startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+// Feature 3 & 4: Signal Filtering and Reversal Logic
+// Track current position state to prevent repeat signals and handle reversals
+var int currentPosition = 0 // 0 = no position, 1 = long, -1 = short
+var float entryPrice = 0.0
+var int entryBar = 0
+var bool positionReversed = false
+
+// Entry Conditions: Booleans for ML Model Position Entries with signal filtering
+canStartLong = (currentPosition == 0 or currentPosition == -1) and isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
+canStartShort = (currentPosition == 0 or currentPosition == 1) and isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+
+// Detect reversal - opposite signal appears mid-trade
+isReversingFromLong = currentPosition == 1 and canStartShort
+isReversingFromShort = currentPosition == -1 and canStartLong
+
+startLongTrade = canStartLong
+startShortTrade = canStartShort
 
 // Dynamic Exit Conditions: Booleans for ML Model Position Exits based on Fractal Filters and Kernel Regression Filters
 lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
@@ -477,21 +515,85 @@ endLongTradeDynamic = (isBearishChange and isValidLongExit[1])
 endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
 
 // Fixed Exit Conditions: Booleans for ML Model Position Exits based on a Bar-Count Filters
-endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
-endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
+endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[exitBarsCount]
+endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[exitBarsCount]
 isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
 endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
 endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+// Feature 7: Performance tracking variables - Point calculation based on close prices
+var array<int> tradeMonths = array.new_int(0)
+var array<int> tradeHours = array.new_int(0)
+var array<float> tradePoints = array.new_float(0)
+var array<bool> tradeWins = array.new_bool(0)
+var array<int> tradeDirections = array.new_int(0)
+
+// Update position tracking with reversal support
+if startLongTrade
+    positionReversed := currentPosition == -1
+    currentPosition := 1
+    if not positionReversed
+        entryPrice := close  // Feature 7: Use close price
+        entryBar := bar_index
+if startShortTrade
+    positionReversed := currentPosition == 1
+    currentPosition := -1
+    if not positionReversed
+        entryPrice := close  // Feature 7: Use close price
+        entryBar := bar_index
+
+// Feature 7: Calculate points on exit using close prices
+if endLongTrade
+    float exitPrice = close  // Use close price
+    float points = exitPrice - entryPrice
+    bool isWin = points > 0
+    array.push(tradeMonths, month(time))
+    array.push(tradeHours, hour(time))
+    array.push(tradePoints, points)
+    array.push(tradeWins, isWin)
+    array.push(tradeDirections, 1)
+    currentPosition := 0
+    positionReversed := false
+
+if endShortTrade
+    float exitPrice = close  // Use close price
+    float points = entryPrice - exitPrice
+    bool isWin = points > 0
+    array.push(tradeMonths, month(time))
+    array.push(tradeHours, hour(time))
+    array.push(tradePoints, points)
+    array.push(tradeWins, isWin)
+    array.push(tradeDirections, -1)
+    currentPosition := 0
+    positionReversed := false
 
 // =========================
 // ==== Plotting Labels ====
 // =========================
 
+// Feature 5: Enhanced text labeling with better positioning
+labelOffset = ta.atr(14) * 0.5 // Use ATR for dynamic offset to avoid overlap
+
 // Note: These will not repaint once the most recent bar has fully closed. By default, signals appear over the last closed bar; to override this behavior set offset=0.
-plotshape(startLongTrade ? low : na, 'Buy', shape.labelup, location.belowbar, color=ml.color_green(prediction), size=size.small, offset=0)
-plotshape(startShortTrade ? high : na, 'Sell', shape.labeldown, location.abovebar, ml.color_red(-prediction), size=size.small, offset=0)
-plotshape(endLongTrade and settings.showExits ? high : na, 'StopBuy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
-plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+if startLongTrade
+    label.new(bar_index, low - labelOffset, text="Buy" + (positionReversed ? "\n(Reversal)" : ""), 
+              style=label.style_label_up, color=ml.color_green(prediction), 
+              textcolor=color.white, size=size.normal)
+
+if startShortTrade
+    label.new(bar_index, high + labelOffset, text="Sell" + (positionReversed ? "\n(Reversal)" : ""), 
+              style=label.style_label_down, color=ml.color_red(-prediction), 
+              textcolor=color.white, size=size.normal)
+
+if endLongTrade and settings.showExits
+    label.new(bar_index, high + labelOffset, text="TP", 
+              style=label.style_label_down, color=color.new(#3AFF17, 0), 
+              textcolor=color.white, size=size.small)
+
+if endShortTrade and settings.showExits
+    label.new(bar_index, low - labelOffset, text="TP", 
+              style=label.style_label_up, color=color.new(#FD1707, 0), 
+              textcolor=color.white, size=size.small)
 
 // ================
 // ==== Alerts ====
@@ -561,3 +663,227 @@ if showTradeStats
     var tbl = ml.init_table()
     if barstate.islast
         update_table(tbl, tradeStatsHeader, totalTrades, totalWins, totalLosses, winLossRatio, winRate, totalEarlySignalFlips)
+
+// ==================================
+// Feature 1: Monthly Performance Table
+// ==================================
+
+getTablePosition(posStr) =>
+    switch posStr
+        "Top Left" => position.top_left
+        "Top Right" => position.top_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        => position.top_right
+
+calcMonthlyStats() =>
+    var array<int> monthlyWins = array.new_int(13, 0)  // Index 1-12 for months
+    var array<int> monthlyLosses = array.new_int(13, 0)
+    var array<float> monthlyWinPoints = array.new_float(13, 0.0)
+    var array<float> monthlyLossPoints = array.new_float(13, 0.0)
+    
+    // Reset arrays
+    for i = 0 to 12
+        array.set(monthlyWins, i, 0)
+        array.set(monthlyLosses, i, 0)
+        array.set(monthlyWinPoints, i, 0.0)
+        array.set(monthlyLossPoints, i, 0.0)
+    
+    // Calculate stats
+    int totalTrades = array.size(tradeMonths)
+    if totalTrades > 0
+        for i = 0 to totalTrades - 1
+            int mon = array.get(tradeMonths, i)
+            float pts = array.get(tradePoints, i)
+            bool isWin = array.get(tradeWins, i)
+            
+            if isWin
+                array.set(monthlyWins, mon, array.get(monthlyWins, mon) + 1)
+                array.set(monthlyWinPoints, mon, array.get(monthlyWinPoints, mon) + pts)
+            else
+                array.set(monthlyLosses, mon, array.get(monthlyLosses, mon) + 1)
+                array.set(monthlyLossPoints, mon, array.get(monthlyLossPoints, mon) + pts)
+    
+    [monthlyWins, monthlyLosses, monthlyWinPoints, monthlyLossPoints]
+
+drawMonthlyTable() =>
+    [mWins, mLosses, mWinPts, mLossPts] = calcMonthlyStats()
+    
+    var table tbl = table.new(getTablePosition(monthlyTablePosition), 10, 14, border_width=1)
+    
+    if barstate.islast
+        // Header row
+        table.cell(tbl, 0, 0, "Month", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 1, 0, "Win Trades", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 2, 0, "Loss Trades", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 3, 0, "Win Pts", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 4, 0, "Loss Pts", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 5, 0, "Net Pts", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 6, 0, "Win Rate", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 7, 0, "P.Factor", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 8, 0, "PNL USD", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 9, 0, "PNL INR", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        
+        array<string> monthNames = array.from("", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        
+        int totalWinTrades = 0
+        int totalLossTrades = 0
+        float totalWinPts = 0.0
+        float totalLossPts = 0.0
+        float totalNetPts = 0.0
+        
+        for mon = 1 to 12
+            int wins = array.get(mWins, mon)
+            int losses = array.get(mLosses, mon)
+            float winPts = array.get(mWinPts, mon)
+            float lossPts = array.get(mLossPts, mon)
+            float netPts = winPts + lossPts
+            int totalTrades = wins + losses
+            float winRate = totalTrades > 0 ? wins / totalTrades * 100 : 0
+            float profitFactor = lossPts != 0 ? math.abs(winPts / lossPts) : winPts > 0 ? 999 : 0
+            float pnlUsd = netPts * pnlPerPoint
+            float pnlInr = pnlUsd * usdToInr
+            
+            totalWinTrades := totalWinTrades + wins
+            totalLossTrades := totalLossTrades + losses
+            totalWinPts := totalWinPts + winPts
+            totalLossPts := totalLossPts + lossPts
+            totalNetPts := totalNetPts + netPts
+            
+            color bgColor = netPts > 0 ? color.new(color.green, 80) : netPts < 0 ? color.new(color.red, 80) : tableBgColor
+            
+            table.cell(tbl, 0, mon, array.get(monthNames, mon), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 1, mon, str.tostring(wins), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 2, mon, str.tostring(losses), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 3, mon, str.tostring(winPts, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 4, mon, str.tostring(lossPts, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 5, mon, str.tostring(netPts, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 6, mon, str.tostring(winRate, "#.#") + "%", bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 7, mon, str.tostring(profitFactor, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 8, mon, str.tostring(pnlUsd, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 9, mon, str.tostring(pnlInr, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+        
+        // Totals row
+        int allTrades = totalWinTrades + totalLossTrades
+        float overallWinRate = allTrades > 0 ? totalWinTrades / allTrades * 100 : 0
+        float overallPF = totalLossPts != 0 ? math.abs(totalWinPts / totalLossPts) : totalWinPts > 0 ? 999 : 0
+        float totalPnlUsd = totalNetPts * pnlPerPoint
+        float totalPnlInr = totalPnlUsd * usdToInr
+        
+        color totalBgColor = totalNetPts > 0 ? color.new(color.green, 60) : color.new(color.red, 60)
+        
+        table.cell(tbl, 0, 13, "TOTAL", bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 1, 13, str.tostring(totalWinTrades), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 2, 13, str.tostring(totalLossTrades), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 3, 13, str.tostring(totalWinPts, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 4, 13, str.tostring(totalLossPts, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 5, 13, str.tostring(totalNetPts, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 6, 13, str.tostring(overallWinRate, "#.#") + "%", bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 7, 13, str.tostring(overallPF, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 8, 13, str.tostring(totalPnlUsd, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 9, 13, str.tostring(totalPnlInr, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+
+if showMonthlyTable
+    drawMonthlyTable()
+
+// ==================================
+// Feature 2: Hourly Performance Table
+// ==================================
+
+calcHourlyStats() =>
+    var array<int> hourlyWins = array.new_int(24, 0)
+    var array<int> hourlyLosses = array.new_int(24, 0)
+    var array<float> hourlyWinPoints = array.new_float(24, 0.0)
+    var array<float> hourlyLossPoints = array.new_float(24, 0.0)
+    
+    // Reset arrays
+    for i = 0 to 23
+        array.set(hourlyWins, i, 0)
+        array.set(hourlyLosses, i, 0)
+        array.set(hourlyWinPoints, i, 0.0)
+        array.set(hourlyLossPoints, i, 0.0)
+    
+    // Calculate stats
+    int totalTrades = array.size(tradeHours)
+    if totalTrades > 0
+        for i = 0 to totalTrades - 1
+            int hr = array.get(tradeHours, i)
+            float pts = array.get(tradePoints, i)
+            bool isWin = array.get(tradeWins, i)
+            
+            if isWin
+                array.set(hourlyWins, hr, array.get(hourlyWins, hr) + 1)
+                array.set(hourlyWinPoints, hr, array.get(hourlyWinPoints, hr) + pts)
+            else
+                array.set(hourlyLosses, hr, array.get(hourlyLosses, hr) + 1)
+                array.set(hourlyLossPoints, hr, array.get(hourlyLossPoints, hr) + pts)
+    
+    [hourlyWins, hourlyLosses, hourlyWinPoints, hourlyLossPoints]
+
+drawHourlyTable() =>
+    [hWins, hLosses, hWinPts, hLossPts] = calcHourlyStats()
+    
+    var table tbl = table.new(getTablePosition(hourlyTablePosition), 6, 25, border_width=1)
+    
+    if barstate.islast
+        // Header row
+        table.cell(tbl, 0, 0, "Hour", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 1, 0, "Trades", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 2, 0, "Win Rate", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 3, 0, "P.Factor", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 4, 0, "PNL USD", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        table.cell(tbl, 5, 0, "PNL INR", bgcolor=tableBgColor, text_color=tableTextColor, text_size=size.small)
+        
+        int totalWinTrades = 0
+        int totalLossTrades = 0
+        float totalWinPts = 0.0
+        float totalLossPts = 0.0
+        float totalNetPts = 0.0
+        
+        for hr = 0 to 23
+            int wins = array.get(hWins, hr)
+            int losses = array.get(hLosses, hr)
+            float winPts = array.get(hWinPts, hr)
+            float lossPts = array.get(hLossPts, hr)
+            float netPts = winPts + lossPts
+            int totalTrades = wins + losses
+            float winRate = totalTrades > 0 ? wins / totalTrades * 100 : 0
+            float profitFactor = lossPts != 0 ? math.abs(winPts / lossPts) : winPts > 0 ? 999 : 0
+            float pnlUsd = netPts * pnlPerPoint
+            float pnlInr = pnlUsd * usdToInr
+            
+            totalWinTrades := totalWinTrades + wins
+            totalLossTrades := totalLossTrades + losses
+            totalWinPts := totalWinPts + winPts
+            totalLossPts := totalLossPts + lossPts
+            totalNetPts := totalNetPts + netPts
+            
+            color bgColor = netPts > 0 ? color.new(color.green, 80) : netPts < 0 ? color.new(color.red, 80) : tableBgColor
+            
+            string hrStr = str.tostring(hr) + ":00"
+            
+            table.cell(tbl, 0, hr + 1, hrStr, bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 1, hr + 1, str.tostring(totalTrades), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 2, hr + 1, str.tostring(winRate, "#.#") + "%", bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 3, hr + 1, str.tostring(profitFactor, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 4, hr + 1, str.tostring(pnlUsd, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+            table.cell(tbl, 5, hr + 1, str.tostring(pnlInr, "#.##"), bgcolor=bgColor, text_color=tableTextColor, text_size=size.small)
+        
+        // Totals row
+        int allTrades = totalWinTrades + totalLossTrades
+        float overallWinRate = allTrades > 0 ? totalWinTrades / allTrades * 100 : 0
+        float overallPF = totalLossPts != 0 ? math.abs(totalWinPts / totalLossPts) : totalWinPts > 0 ? 999 : 0
+        float totalPnlUsd = totalNetPts * pnlPerPoint
+        float totalPnlInr = totalPnlUsd * usdToInr
+        
+        color totalBgColor = totalNetPts > 0 ? color.new(color.green, 60) : color.new(color.red, 60)
+        
+        table.cell(tbl, 0, 24, "TOTAL", bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 1, 24, str.tostring(allTrades), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 2, 24, str.tostring(overallWinRate, "#.#") + "%", bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 3, 24, str.tostring(overallPF, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 4, 24, str.tostring(totalPnlUsd, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+        table.cell(tbl, 5, 24, str.tostring(totalPnlInr, "#.##"), bgcolor=totalBgColor, text_color=color.white, text_size=size.normal)
+
+if showHourlyTable
+    drawHourlyTable()
