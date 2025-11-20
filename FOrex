@@ -475,34 +475,42 @@ var bool isFirstEntry = true
 startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
 startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
 
-// Handle consecutive same-side signals (accumulation)
-if startLongTrade and currentPosition == 1
+// Track original signals before modification
+origStartLongTrade = startLongTrade
+origStartShortTrade = startShortTrade
+
+// Handle consecutive same-side signals (accumulation) - eliminate them
+if origStartLongTrade and currentPosition == 1
     accumulatedSignals += 1
     startLongTrade := false  // Eliminate consecutive same-side signal
-else if startShortTrade and currentPosition == -1
+    
+if origStartShortTrade and currentPosition == -1
     accumulatedSignals += 1
     startShortTrade := false  // Eliminate consecutive same-side signal
 
-// Handle trade reversals (opposite signal mid-trade)
-if startLongTrade and currentPosition == -1
+// Handle trade reversals (opposite signal mid-trade) and new positions
+if origStartLongTrade and currentPosition == -1
     // Reverse from short to long
     currentPosition := 1
     entryPrice := close
     accumulatedSignals := 0
     isFirstEntry := true
-else if startShortTrade and currentPosition == 1
+    
+if origStartShortTrade and currentPosition == 1
     // Reverse from long to short
     currentPosition := -1
     entryPrice := close
     accumulatedSignals := 0
     isFirstEntry := true
-else if startLongTrade and currentPosition == 0
+    
+if origStartLongTrade and currentPosition == 0
     // New long position
     currentPosition := 1
     entryPrice := close
     accumulatedSignals := 0
     isFirstEntry := true
-else if startShortTrade and currentPosition == 0
+    
+if origStartShortTrade and currentPosition == 0
     // New short position
     currentPosition := -1
     entryPrice := close
