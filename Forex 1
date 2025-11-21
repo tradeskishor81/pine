@@ -212,6 +212,8 @@ Settings settings =
 // Trade Stats Settings
 // Note: The trade stats section is NOT intended to be used as a replacement for proper backtesting. It is intended to be used for calibration purposes only.
 showTradeStats = input.bool(true, 'Show Trade Stats', tooltip='Displays the trade stats for a given configuration. Useful for optimizing the settings in the Feature Engineering section. This should NOT replace backtesting and should be used for calibration purposes only. Early Signal Flips represent instances where the model changes signals before 4 bars elapses; high values can indicate choppy (ranging) market conditions.', group="General Settings")
+showPerformanceTable = input.bool(true, 'Show Performance Table', tooltip='Displays detailed performance metrics including profit factor, average trade statistics, and consecutive win/loss streaks.', group="General Settings")
+showDrawdownTable = input.bool(true, 'Show Drawdown Table', tooltip='Displays drawdown metrics including maximum drawdown, current drawdown, and recovery information.', group="General Settings")
 useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to use the worst case scenario for backtesting. This option can be useful for creating a conservative estimate that is based on close prices only, thus avoiding the effects of intrabar repainting. This option assumes that the user does not enter when the signal first appears and instead waits for the bar to close as confirmation. On larger timeframes, this can mean entering after a large move has already occurred. Leaving this option disabled is generally better for those that use this indicator as a source of confluence and prefer estimates that demonstrate discretionary mid-bar entries. Leaving this option enabled may be more consistent with traditional backtesting results.", group="General Settings")
 
 // Settings object for user-defined settings
@@ -565,3 +567,138 @@ if showTradeStats
     var tbl = ml.init_table()
     if barstate.islast
         update_table(tbl, tradeStatsHeader, totalTrades, totalWins, totalLosses, winLossRatio, winRate, totalEarlySignalFlips)
+
+// ==============================
+// ==== Performance Metrics =====
+// ==============================
+
+// Calculate performance metrics
+var float sumWins = 0.0
+var float sumLosses = 0.0
+var int consecutiveWins = 0
+var int consecutiveLosses = 0
+var int maxConsecutiveWins = 0
+var int maxConsecutiveLosses = 0
+var int currentStreak = 0
+var bool lastTradeWasWin = false
+
+// Track individual trade results
+var float lastEntryPrice = 0.0
+var bool inTrade = false
+var bool isLongTrade = false
+
+if startLongTrade
+    lastEntryPrice := settings.source
+    inTrade := true
+    isLongTrade := true
+
+if startShortTrade
+    lastEntryPrice := settings.source
+    inTrade := true
+    isLongTrade := false
+
+if inTrade and (endLongTrade or endShortTrade)
+    tradeProfit = isLongTrade ? (settings.source - lastEntryPrice) : (lastEntryPrice - settings.source)
+    isWin = tradeProfit > 0
+    
+    if isWin
+        sumWins += tradeProfit
+        consecutiveWins := lastTradeWasWin ? consecutiveWins + 1 : 1
+        consecutiveLosses := 0
+        maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+        lastTradeWasWin := true
+    else
+        sumLosses += math.abs(tradeProfit)
+        consecutiveLosses := not lastTradeWasWin ? consecutiveLosses + 1 : 1
+        consecutiveWins := 0
+        maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+        lastTradeWasWin := false
+    
+    inTrade := false
+
+avgWin = totalWins > 0 ? sumWins / totalWins : 0
+avgLoss = totalLosses > 0 ? sumLosses / totalLosses : 0
+profitFactor = totalLosses > 0 and sumLosses > 0 ? sumWins / sumLosses : 0
+avgTrade = totalTrades > 0 ? (sumWins - sumLosses) / totalTrades : 0
+
+// ==============================
+// ==== Drawdown Metrics ========
+// ==============================
+
+// Calculate equity curve and drawdown
+var float equity = 10000.0
+var float peakEquity = 10000.0
+var float maxDrawdown = 0.0
+var int drawdownBars = 0
+var int maxDrawdownBars = 0
+var float currentDrawdown = 0.0
+var int barsInDrawdown = 0
+
+if inTrade and (endLongTrade or endShortTrade)
+    tradeProfit = isLongTrade ? (settings.source - lastEntryPrice) : (lastEntryPrice - settings.source)
+    tradeProfitPct = tradeProfit / lastEntryPrice * 100
+    equity := equity * (1 + tradeProfitPct / 100)
+    
+    if equity > peakEquity
+        peakEquity := equity
+        barsInDrawdown := 0
+    else
+        barsInDrawdown += 1
+    
+    currentDrawdown := (peakEquity - equity) / peakEquity * 100
+    maxDrawdown := math.max(maxDrawdown, currentDrawdown)
+    
+    if barsInDrawdown > maxDrawdownBars
+        maxDrawdownBars := barsInDrawdown
+
+// Performance Table Functions
+init_performance_table() =>
+    c_transparent = color.new(color.black, 100)
+    table.new(position.top_left, columns=2, rows=8, frame_color=color.new(color.black, 100), frame_width=1, border_width=1, border_color=c_transparent)
+
+update_performance_table(tbl, pf, avgW, avgL, avgT, maxCW, maxCL) =>
+    c_transparent = color.new(color.black, 100)
+    table.cell(tbl, 0, 0, 'Performance Metrics', text_halign=text.align_center, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 1, 'Profit Factor', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 1, str.tostring(pf, '0.00'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 2, 'Avg Win', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 2, str.tostring(avgW, '0.0000'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 3, 'Avg Loss', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 3, str.tostring(avgL, '0.0000'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 4, 'Avg Trade', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 4, str.tostring(avgT, '0.0000'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 5, 'Max Consecutive Wins', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 5, str.tostring(maxCW, '#'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 6, 'Max Consecutive Losses', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 6, str.tostring(maxCL, '#'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+
+// Drawdown Table Functions
+init_drawdown_table() =>
+    c_transparent = color.new(color.black, 100)
+    table.new(position.bottom_left, columns=2, rows=6, frame_color=color.new(color.black, 100), frame_width=1, border_width=1, border_color=c_transparent)
+
+update_drawdown_table(tbl, maxDD, currDD, maxDDBars, currDDBars, eq) =>
+    c_transparent = color.new(color.black, 100)
+    table.cell(tbl, 0, 0, 'Drawdown Metrics', text_halign=text.align_center, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 1, 'Max Drawdown', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 1, str.tostring(maxDD, '0.00') + '%', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 2, 'Current Drawdown', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 2, str.tostring(currDD, '0.00') + '%', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 3, 'Max DD Duration', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 3, str.tostring(maxDDBars, '#') + ' bars', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 4, 'Current DD Duration', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 4, str.tostring(currDDBars, '#') + ' bars', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 0, 5, 'Equity', text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+    table.cell(tbl, 1, 5, str.tostring(eq, '0.00'), text_halign=text.align_center, bgcolor=c_transparent, text_color=color.gray, text_size=size.normal)
+
+// Display Performance Table
+if showPerformanceTable
+    var perfTbl = init_performance_table()
+    if barstate.islast
+        update_performance_table(perfTbl, profitFactor, avgWin, avgLoss, avgTrade, maxConsecutiveWins, maxConsecutiveLosses)
+
+// Display Drawdown Table
+if showDrawdownTable
+    var ddTbl = init_drawdown_table()
+    if barstate.islast
+        update_drawdown_table(ddTbl, maxDrawdown, currentDrawdown, maxDrawdownBars, barsInDrawdown, equity)
